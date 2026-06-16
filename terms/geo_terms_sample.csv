@@ -1,0 +1,58 @@
+en_term,zh_term,definition
+Airy Hypothesis,艾里假说,地壳均衡理论之一，认为地壳密度均匀而厚度不同
+Moho Discontinuity,莫霍面,地壳与地幔的分界面
+Pratt Hypothesis,普拉特假说,地壳均衡理论之一，认为地壳厚度相同而密度不同
+Isostasy,地壳均衡,地壳在地幔软流圈上保持平衡的状态
+Continental Drift,大陆漂移,大陆板块在地质历史时期发生水平移动的理论
+Plate Tectonics,板块构造,描述岩石圈板块运动的地质学理论
+Subduction Zone,俯冲带,一个板块俯冲到另一个板块之下的边界区域
+Mid-Ocean Ridge,洋中脊,大洋底部的山脊状地形，新洋壳在此生成
+Rift Valley,裂谷,地壳张裂形成的地堑式谷地
+Geoid,大地水准面,与平均海平面重合并延伸至大陆内部的等位面
+Ellipsoid,参考椭球体,用于测量和制图的地球形状数学模型
+Datum,基准面,测量高程或坐标的参考基准
+Geodesy,大地测量学,研究地球形状、大小和重力场的科学
+Topography,地形,地表三维形态的总体特征
+Bathymetry,水深测量,海底深度的测量与绘制
+Cartography,制图学,地图制作的科学与艺术
+Map Projection,地图投影,将球面转换为平面地图的数学方法
+Mercator Projection,墨卡托投影,一种等角圆柱投影，适用于航海图
+Contour Line,等高线,地图上连接相同高程点的曲线
+Digital Elevation Model,数字高程模型,以数字形式表示地形高程的数据集
+Remote Sensing,遥感,通过非接触方式探测和测量地球表面的技术
+Geographic Information System,地理信息系统,用于采集、存储、分析和显示空间数据的系统
+GPS,全球定位系统,利用卫星信号确定位置的导航系统
+GNSS,全球导航卫星系统,包括GPS、北斗、GLONASS等卫星导航系统的总称
+LiDAR,激光雷达,利用激光脉冲测量距离和生成三维点云的技术
+Sediment,沉积物,由风、水、冰等外力搬运并沉积的矿物和有机物质
+Stratigraphy,地层学,研究地层顺序、分布和性质的地质学分支
+Fault,断层,岩石圈中发生明显位移的破裂面
+Anticline,背斜,岩层向上拱起的褶皱构造
+Syncline,向斜,岩层向下弯曲的褶皱构造
+Igneous Rock,火成岩,由岩浆冷凝固结形成的岩石
+Sedimentary Rock,沉积岩,由沉积物经压实、胶结形成的岩石
+Metamorphic Rock,变质岩,在高温高压条件下由原有岩石变质而成的岩石
+Weathering,风化,岩石在地表条件下发生的物理和化学分解过程
+Erosion,侵蚀,地表物质被流水、风、冰川等外力搬运移除的过程
+Alluvial Fan,冲积扇,河流在出山口因坡度减缓堆积形成的扇形地貌
+Delta,三角洲,河流入海或入湖处因泥沙堆积形成的低平地形
+Watershed,流域,向同一河流或湖泊排水的地理区域
+Aquifer,含水层,能储存和传导地下水的透水岩层或沉积层
+Karst,喀斯特,可溶性岩石在水溶蚀作用下形成的地貌
+Glacier,冰川,在重力作用下缓慢移动的大型多年积雪和冰体
+Permafrost,永久冻土,连续两年以上温度保持在0°C以下的土层
+Biome,生物群落,具有相似气候和生物群落特征的大型陆地生态系统
+Ecosystem,生态系统,生物群落与其非生物环境相互作用的系统
+Climate Zone,气候带,具有相似气候特征的地理区域
+Monsoon,季风,因大陆和海洋之间的热力差异引起的季节性风向变化
+El Niño,厄尔尼诺,赤道东太平洋海表温度异常偏高的周期性气候现象
+La Niña,拉尼娜,赤道东太平洋海表温度异常偏低的周期性气候现象
+Tectonic Plate,构造板块,地球岩石圈分裂成的若干巨大刚性板块
+Mantle Convection,地幔对流,地幔物质因温度差异产生的缓慢环流运动
+Hotspot,热点,地幔深处的高热流区域，可导致火山活动
+Volcanic Arc,火山弧,俯冲带上方形成的一系列火山构成的弧形带
+Ophiolite,蛇绿岩,保存在大陆上的古洋壳残片
+Geochronology,地质年代学,研究岩石和地质事件年龄的学科
+Radiometric Dating,放射性测年,利用放射性同位素衰变确定地质年龄的方法
+Paleontology,古生物学,研究古代生物化石的科学
+Biostratigraphy,生物地层学,利用化石确定地层年代和对比的方法

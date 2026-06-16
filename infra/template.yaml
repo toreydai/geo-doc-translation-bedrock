@@ -1,0 +1,547 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  Geo-Document Translation System
+  Translates Chinese/English geographical .docx files using Bedrock Kimi K2,
+  orchestrated by Step Functions with Distributed Map for large-document support.
+
+# ─────────────────────────────────────────────────────────────────────────────
+Parameters:
+# ─────────────────────────────────────────────────────────────────────────────
+
+  NotificationEmail:
+    Type: String
+    Description: Email address for translation completion/failure alerts
+
+  ModelId:
+    Type: String
+    Default: moonshotai.kimi-k2.5
+    Description: Bedrock model ID (change here to swap models, no code changes needed)
+
+  BedrockRegion:
+    Type: String
+    Default: us-east-1
+    Description: AWS region where Bedrock is accessed
+
+  TermsKey:
+    Type: String
+    Default: terms/geo_terms.csv
+    Description: S3 key of the geo terms CSV inside the TermsBucket
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+Globals:
+# ─────────────────────────────────────────────────────────────────────────────
+
+  Function:
+    Runtime: python3.12
+    Timeout: 900          # all functions may run up to 15 min
+    MemorySize: 1024
+    Environment:
+      Variables:
+        JOBS_TABLE: !Ref JobsTable
+        POWERTOOLS_SERVICE_NAME: geo-translation
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+Resources:
+# ─────────────────────────────────────────────────────────────────────────────
+
+  # ── KMS key (all S3 buckets share one CMK for simplicity) ─────────────────
+  TranslationKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: CMK for geo-translation S3 and Lambda env vars
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+
+  TranslationKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${AWS::StackName}-key"
+      TargetKeyId: !Ref TranslationKMSKey
+
+
+  # ── S3 Buckets ─────────────────────────────────────────────────────────────
+
+  InputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-input-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref TranslationKMSKey
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldInputs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  ChunksBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-chunks-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref TranslationKMSKey
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireChunks
+            Status: Enabled
+            ExpirationInDays: 7
+
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-results-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref TranslationKMSKey
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireResults
+            Status: Enabled
+            ExpirationInDays: 7
+
+  OutputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-output-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref TranslationKMSKey
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldOutputs
+            Status: Enabled
+            ExpirationInDays: 180
+
+  TermsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-terms-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref TranslationKMSKey
+      VersioningConfiguration:
+        Status: Enabled
+
+
+  # ── DynamoDB jobs table ────────────────────────────────────────────────────
+  JobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-jobs"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: job_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: job_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+
+  # ── SQS Dead-Letter Queue ──────────────────────────────────────────────────
+  TranslationDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-dlq"
+      MessageRetentionPeriod: 1209600   # 14 days
+      KmsMasterKeyId: !Ref TranslationKMSKey
+
+
+  # ── SNS Topic ─────────────────────────────────────────────────────────────
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-notifications"
+      KmsMasterKeyId: !Ref TranslationKMSKey
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref NotificationEmail
+
+
+  # ── Lambda Layer (python-docx) ─────────────────────────────────────────────
+  DocxLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${AWS::StackName}-docx"
+      ContentUri: ../layers/docx/
+      CompatibleRuntimes:
+        - python3.12
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: python3.12
+
+
+  # ── Lambda: doc-parser ─────────────────────────────────────────────────────
+  DocParserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-doc-parser"
+      CodeUri: ../lambdas/doc_parser/
+      Handler: handler.lambda_handler
+      Layers:
+        - !Ref DocxLayer
+      Environment:
+        Variables:
+          CHUNKS_BUCKET: !Ref ChunksBucket
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref InputBucket
+        - S3WritePolicy:
+            BucketName: !Ref ChunksBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JobsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt TranslationKMSKey.Arn
+
+
+  # ── Lambda: chunk-translator ───────────────────────────────────────────────
+  ChunkTranslatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-chunk-translator"
+      CodeUri: ../lambdas/chunk_translator/
+      Handler: handler.lambda_handler
+      Environment:
+        Variables:
+          RESULTS_BUCKET: !Ref ResultsBucket
+          TERMS_BUCKET: !Ref TermsBucket
+          TERMS_KEY: !Ref TermsKey
+          MODEL_ID: !Ref ModelId
+          BEDROCK_REGION: !Ref BedrockRegion
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref TermsBucket
+        - S3WritePolicy:
+            BucketName: !Ref ResultsBucket
+        - DynamoDBWritePolicy:
+            TableName: !Ref JobsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:Converse
+              Resource:
+                - !Sub "arn:aws:bedrock:${BedrockRegion}::foundation-model/*"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt TranslationKMSKey.Arn
+            - Effect: Allow
+              Action: cloudwatch:PutMetricData
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  "cloudwatch:namespace": "GeoTranslation"
+
+
+  # ── Lambda: doc-assembler ──────────────────────────────────────────────────
+  DocAssemblerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-doc-assembler"
+      CodeUri: ../lambdas/doc_assembler/
+      Handler: handler.lambda_handler
+      Layers:
+        - !Ref DocxLayer
+      Environment:
+        Variables:
+          RESULTS_BUCKET: !Ref ResultsBucket
+          OUTPUT_BUCKET: !Ref OutputBucket
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref InputBucket
+        - S3ReadPolicy:
+            BucketName: !Ref ResultsBucket
+        - S3WritePolicy:
+            BucketName: !Ref OutputBucket
+        - DynamoDBWritePolicy:
+            TableName: !Ref JobsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey
+              Resource: !GetAtt TranslationKMSKey.Arn
+
+
+  # ── Step Functions execution role ──────────────────────────────────────────
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-sfn-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SFNPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt DocParserFunction.Arn
+                  - !GetAtt ChunkTranslatorFunction.Arn
+                  - !GetAtt DocAssemblerFunction.Arn
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref NotificationTopic
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ChunksBucket.Arn
+                  - !Sub "${ChunksBucket.Arn}/*"
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt TranslationDLQ.Arn
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                  - states:DescribeExecution
+                  - states:StopExecution
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt TranslationKMSKey.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutLogEvents
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: "*"
+              - Effect: Allow
+                Action: xray:PutTraceSegments
+                Resource: "*"
+
+
+  # ── Step Functions state machine ───────────────────────────────────────────
+  TranslationStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "${AWS::StackName}-workflow"
+      DefinitionUri: ../statemachine/translation_workflow.asl.json
+      DefinitionSubstitutions:
+        DocParserArn:          !GetAtt DocParserFunction.Arn
+        ChunkTranslatorArn:    !GetAtt ChunkTranslatorFunction.Arn
+        DocAssemblerArn:       !GetAtt DocAssemblerFunction.Arn
+        DLQUrl:                !Ref TranslationDLQ
+        NotificationTopicArn:  !Ref NotificationTopic
+      Role: !GetAtt StateMachineRole.Arn
+      Logging:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+        IncludeExecutionData: false
+        Level: ERROR
+      Tracing:
+        Enabled: true
+
+
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/states/${AWS::StackName}-workflow"
+      RetentionInDays: 30
+
+
+  # ── EventBridge rule: S3 .docx upload → start state machine ──────────────
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-eb-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartSFN
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Ref TranslationStateMachine
+
+  DocxUploadRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${AWS::StackName}-docx-upload"
+      Description: Trigger translation workflow when a .docx is uploaded to input bucket
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Ref InputBucket
+          object:
+            key:
+              - suffix: .docx
+      Targets:
+        - Id: StartTranslationWorkflow
+          Arn: !Ref TranslationStateMachine
+          RoleArn: !GetAtt EventBridgeRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              bucket: "$.detail.bucket.name"
+              key:    "$.detail.object.key"
+            InputTemplate: '{"bucket": "<bucket>", "key": "<key>"}'
+
+
+  # ── CloudWatch Alarms ──────────────────────────────────────────────────────
+  SFNFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-sfn-failures"
+      AlarmDescription: Step Functions execution failures
+      MetricName: ExecutionsFailed
+      Namespace: AWS/States
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Ref TranslationStateMachine
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref NotificationTopic
+
+  DLQDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-dlq-depth"
+      AlarmDescription: Failed chunk translations in dead-letter queue
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt TranslationDLQ.QueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref NotificationTopic
+
+  LambdaDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-lambda-duration"
+      AlarmDescription: doc-assembler approaching Lambda timeout
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DocAssemblerFunction
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 720000    # 12 minutes in ms
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref NotificationTopic
+
+  BedrockThrottlingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-bedrock-throttling"
+      AlarmDescription: Bedrock ThrottlingException rate high — consider reducing MaxConcurrency in statemachine/translation_workflow.asl.json
+      MetricName: BedrockThrottling
+      Namespace: GeoTranslation
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref NotificationTopic
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+Outputs:
+# ─────────────────────────────────────────────────────────────────────────────
+
+  InputBucketName:
+    Description: Upload .docx files here to trigger translation
+    Value: !Ref InputBucket
+
+  OutputBucketName:
+    Description: Translated .docx files appear here
+    Value: !Ref OutputBucket
+
+  TermsBucketName:
+    Description: Upload geo_terms.csv here (key = terms/geo_terms.csv)
+    Value: !Ref TermsBucket
+
+  StateMachineArn:
+    Description: Step Functions state machine ARN
+    Value: !Ref TranslationStateMachine
+
+  JobsTableName:
+    Description: DynamoDB table for job tracking and idempotency
+    Value: !Ref JobsTable
+
+  DLQUrl:
+    Description: Dead-letter queue URL for failed chunk translations
+    Value: !Ref TranslationDLQ

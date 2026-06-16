@@ -1,0 +1,164 @@
+{
+  "Comment": "地理领域文档自动化翻译工作流 — Geo-Document Translation Workflow",
+  "StartAt": "InitJob",
+  "States": {
+
+    "InitJob": {
+      "Type": "Pass",
+      "Comment": "Inject a placeholder job_id so NotifyFailure can always safely read $.job_id, even if ParseDocument fails before producing one.",
+      "Parameters": {
+        "bucket.$": "$.bucket",
+        "key.$":    "$.key",
+        "job_id":   "pending"
+      },
+      "Next": "ParseDocument"
+    },
+
+    "ParseDocument": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DocParserArn}",
+        "Payload.$": "$"
+      },
+      "ResultSelector": {
+        "job_id.$":          "$.Payload.job_id",
+        "source_lang.$":     "$.Payload.source_lang",
+        "chunks_bucket.$":   "$.Payload.chunks_bucket",
+        "chunks_manifest.$": "$.Payload.chunks_manifest",
+        "total_chunks.$":    "$.Payload.total_chunks",
+        "source_bucket.$":   "$.Payload.source_bucket",
+        "source_key.$":      "$.Payload.source_key"
+      },
+      "Next": "TranslateChunks",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "NotifyFailure"
+        }
+      ]
+    },
+
+    "TranslateChunks": {
+      "Type": "Map",
+      "MaxConcurrency": 10,
+      "ItemReader": {
+        "Resource": "arn:aws:states:::s3:getObject",
+        "ReaderConfig": {
+          "InputType": "JSON"
+        },
+        "Parameters": {
+          "Bucket.$": "$.chunks_bucket",
+          "Key.$":    "$.chunks_manifest"
+        }
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "STANDARD"
+        },
+        "StartAt": "TranslateChunk",
+        "States": {
+          "TranslateChunk": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${ChunkTranslatorArn}",
+              "Payload.$": "$"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "ThrottlingException",
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "States.TaskFailed"
+                ],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "ResultPath": "$.error",
+                "Next": "SendToDeadLetter"
+              }
+            ],
+            "End": true
+          },
+          "SendToDeadLetter": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sqs:sendMessage",
+            "Parameters": {
+              "QueueUrl": "${DLQUrl}",
+              "MessageBody.$": "States.JsonToString($)"
+            },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": null,
+      "Next": "AssembleDocument",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "NotifyFailure"
+        }
+      ]
+    },
+
+    "AssembleDocument": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DocAssemblerArn}",
+        "Payload": {
+          "job_id.$":        "$.job_id",
+          "source_bucket.$": "$.source_bucket",
+          "source_key.$":    "$.source_key"
+        }
+      },
+      "ResultSelector": {
+        "job_id.$":           "$.Payload.job_id",
+        "output_bucket.$":    "$.Payload.output_bucket",
+        "output_key.$":       "$.Payload.output_key",
+        "chunks_assembled.$": "$.Payload.chunks_assembled"
+      },
+      "Next": "NotifySuccess",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "NotifyFailure"
+        }
+      ]
+    },
+
+    "NotifySuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${NotificationTopicArn}",
+        "Subject.$": "States.Format('[地理文档翻译] 完成 — {}', $.job_id)",
+        "Message.$": "States.Format('翻译任务已完成。\n\nJob ID: {}\n输出文件: s3://{}/{}\n段落数量: {}', $.job_id, $.output_bucket, $.output_key, $.chunks_assembled)"
+      },
+      "End": true
+    },
+
+    "NotifyFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${NotificationTopicArn}",
+        "Subject.$": "States.Format('[地理文档翻译] 失败 — {}', $.job_id)",
+        "Message.$": "States.Format('翻译任务失败，需人工介入。\n\nJob ID: {}\n错误: {}', $.job_id, States.JsonToString($.error))"
+      },
+      "End": true
+    }
+  }
+}
