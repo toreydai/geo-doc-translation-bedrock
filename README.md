@@ -122,7 +122,7 @@ aws s3 cp terms/geo_terms_sample.csv \
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT - see the [LICENSE](LICENSE) file for details.
 
 ## 免责声明
 
